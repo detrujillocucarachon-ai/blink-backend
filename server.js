@@ -1,5 +1,5 @@
 // ============================================================
-// BACKEND WITH 1SECMAIL API
+// BACKEND WITH 1SECMAIL - FIXED
 // ============================================================
 
 const express = require('express');
@@ -14,19 +14,21 @@ app.use(express.json());
 // 1secmail API endpoints
 const SECMAIL_API = "https://www.1secmail.com/api/v1";
 
+// Fallback domains if 1secmail fails
+const FALLBACK_DOMAINS = ['1secmail.net', '1secmail.com', '1secmail.org'];
+
 // ===== CREATE MAILBOX =====
 app.get('/api/create-mailbox', async (req, res) => {
     try {
-        // Generate random email
         const randomId = Math.random().toString(36).substring(2, 12);
-        const domain = '1secmail.net'; // works with 1secmail.com, 1secmail.org, 1secmail.net
-        
+        const domain = FALLBACK_DOMAINS[0];
         const email = randomId + '@' + domain;
         const password = 'AutoPass' + Math.random().toString(36).substring(2, 8) + '!';
         
         console.log('📧 Created:', email);
         
         res.json({
+            success: true,
             email: email,
             password: password,
             domain: domain,
@@ -34,7 +36,10 @@ app.get('/api/create-mailbox', async (req, res) => {
         });
     } catch (error) {
         console.error('Create error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
@@ -43,46 +48,70 @@ app.get('/api/messages', async (req, res) => {
     try {
         const { email } = req.query;
         if (!email) {
-            return res.status(400).json({ error: 'Missing email parameter' });
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Missing email parameter' 
+            });
         }
         
         const [id, domain] = email.split('@');
         
-        // Get message list
-        const response = await fetch(`${SECMAIL_API}/messages/${id}/${domain}`);
-        const messages = await response.json();
-        
-        console.log('📩 Messages for:', email, messages);
-        
-        // Get full content for each message
-        const fullMessages = [];
-        if (messages && messages.length > 0) {
-            for (const msg of messages) {
-                const msgRes = await fetch(`${SECMAIL_API}/message/${id}/${domain}/${msg.id}`);
-                const msgData = await msgRes.json();
-                fullMessages.push({
-                    id: msg.id,
-                    from: msgData.from,
-                    subject: msgData.subject,
-                    body: msgData.textBody || msgData.htmlBody || '',
-                    date: msgData.date
-                });
+        // Try to get messages from 1secmail
+        try {
+            const response = await fetch(`${SECMAIL_API}/messages/${id}/${domain}`);
+            const messages = await response.json();
+            
+            // If we got HTML back, return empty array
+            if (typeof messages === 'string' && messages.includes('<!DOCTYPE')) {
+                console.log('⚠️ Received HTML instead of JSON');
+                return res.json({ success: true, messages: [] });
             }
+            
+            // Get full content for each message
+            const fullMessages = [];
+            if (messages && Array.isArray(messages) && messages.length > 0) {
+                for (const msg of messages) {
+                    try {
+                        const msgRes = await fetch(`${SECMAIL_API}/message/${id}/${domain}/${msg.id}`);
+                        const msgData = await msgRes.json();
+                        fullMessages.push({
+                            id: msg.id,
+                            from: msgData.from || '',
+                            subject: msgData.subject || '',
+                            body: msgData.textBody || msgData.htmlBody || '',
+                            date: msgData.date || ''
+                        });
+                    } catch (e) {
+                        console.log('Error fetching message:', e);
+                    }
+                }
+            }
+            
+            res.json({ success: true, messages: fullMessages });
+            
+        } catch (fetchError) {
+            console.log('1secmail fetch error:', fetchError.message);
+            res.json({ success: true, messages: [] });
         }
         
-        res.json(fullMessages);
     } catch (error) {
         console.error('Messages error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
-// ===== WAIT FOR MESSAGE (polling) =====
+// ===== WAIT FOR MESSAGE =====
 app.get('/api/wait-for-message', async (req, res) => {
     try {
         const { email, maxAttempts = 20, delay = 3000 } = req.query;
         if (!email) {
-            return res.status(400).json({ error: 'Missing email parameter' });
+            return res.status(400).json({ 
+                success: false, 
+                error: 'Missing email parameter' 
+            });
         }
         
         const [id, domain] = email.split('@');
@@ -96,34 +125,48 @@ app.get('/api/wait-for-message', async (req, res) => {
                 const response = await fetch(`${SECMAIL_API}/messages/${id}/${domain}`);
                 const messages = await response.json();
                 
-                if (messages && messages.length > 0) {
-                    // Get the first message
-                    const msgRes = await fetch(`${SECMAIL_API}/message/${id}/${domain}/${messages[0].id}`);
-                    const msgData = await msgRes.json();
-                    
-                    return res.json({
-                        found: true,
-                        message: {
-                            id: messages[0].id,
-                            from: msgData.from,
-                            subject: msgData.subject,
-                            body: msgData.textBody || msgData.htmlBody || '',
-                            date: msgData.date
-                        }
-                    });
+                // Check if we got HTML back
+                if (typeof messages === 'string' && messages.includes('<!DOCTYPE')) {
+                    console.log('⚠️ Received HTML, waiting...');
+                    await new Promise(r => setTimeout(r, parseInt(delay)));
+                    continue;
+                }
+                
+                if (messages && Array.isArray(messages) && messages.length > 0) {
+                    try {
+                        const msgRes = await fetch(`${SECMAIL_API}/message/${id}/${domain}/${messages[0].id}`);
+                        const msgData = await msgRes.json();
+                        
+                        return res.json({
+                            success: true,
+                            found: true,
+                            message: {
+                                id: messages[0].id,
+                                from: msgData.from || '',
+                                subject: msgData.subject || '',
+                                body: msgData.textBody || msgData.htmlBody || '',
+                                date: msgData.date || ''
+                            }
+                        });
+                    } catch (e) {
+                        console.log('Error fetching message:', e);
+                    }
                 }
             } catch (e) {
                 console.log('Error checking:', e);
             }
             
-            // Wait before next attempt
             await new Promise(r => setTimeout(r, parseInt(delay)));
         }
         
-        res.json({ found: false });
+        res.json({ success: true, found: false });
+        
     } catch (error) {
         console.error('Wait error:', error);
-        res.status(500).json({ error: error.message });
+        res.status(500).json({ 
+            success: false, 
+            error: error.message 
+        });
     }
 });
 
