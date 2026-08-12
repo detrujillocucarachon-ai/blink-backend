@@ -8,15 +8,30 @@ const MAIL_API = "https://mail.tm";
 app.use(cors());
 app.use(express.json());
 
+// Fallback domains in case API fails
+const FALLBACK_DOMAINS = ['mail.tm', 'cliptik.net', 'frandin.com'];
+
 app.get('/api/create-mailbox', async (req, res) => {
     try {
-        const domainRes = await fetch(`${MAIL_API}/domains`);
-        const domainData = await domainRes.json();
-        const domains = domainData['hydra:member'];
-        if (!domains || domains.length === 0) {
-            return res.status(500).json({ error: "No domains available" });
+        let domain;
+        
+        // Try to get domains from API first
+        try {
+            const domainRes = await fetch(`${MAIL_API}/domains`);
+            const domainData = await domainRes.json();
+            const domains = domainData['hydra:member'];
+            if (domains && domains.length > 0) {
+                domain = domains[0].domain;
+            }
+        } catch (apiError) {
+            console.log('API fetch failed, using fallback domain');
         }
-        const domain = domains[0].domain;
+        
+        // Use fallback if API didn't work
+        if (!domain) {
+            domain = FALLBACK_DOMAINS[0];
+        }
+        
         const uniqueId = Math.random().toString(36).substring(2, 10);
         const email = `user_${uniqueId}@${domain}`;
         const password = `Pass_${uniqueId}!`;
@@ -28,7 +43,8 @@ app.get('/api/create-mailbox', async (req, res) => {
         });
 
         if (!registerRes.ok) {
-            return res.status(400).json({ error: "Failed to create account" });
+            const errorText = await registerRes.text();
+            return res.status(400).json({ error: "Failed to create account", details: errorText });
         }
 
         const loginRes = await fetch(`${MAIL_API}/token`, {
@@ -37,8 +53,17 @@ app.get('/api/create-mailbox', async (req, res) => {
             body: JSON.stringify({ address: email, password: password })
         });
 
+        if (!loginRes.ok) {
+            return res.status(400).json({ error: "Failed to login" });
+        }
+
         const loginData = await loginRes.json();
-        res.json({ email: email, token: loginData.token, accountId: loginData.id });
+        res.json({ 
+            email: email, 
+            token: loginData.token, 
+            accountId: loginData.id,
+            domain: domain
+        });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -59,6 +84,16 @@ app.get('/api/messages', async (req, res) => {
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
+});
+
+app.get('/', (req, res) => {
+    res.json({ 
+        status: '✅ Backend is running!',
+        endpoints: {
+            createMailbox: '/api/create-mailbox',
+            messages: '/api/messages'
+        }
+    });
 });
 
 app.listen(PORT, () => {
