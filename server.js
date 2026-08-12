@@ -1,70 +1,39 @@
+// ============================================================
+// BACKEND WITH 1SECMAIL API
+// ============================================================
+
 const express = require('express');
 const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MAIL_API = "https://api.mail.tm";
 
 app.use(cors());
 app.use(express.json());
 
-// ===== ROOT =====
-app.get('/', (req, res) => {
-    res.json({ 
-        status: '✅ Backend running',
-        endpoints: {
-            createMailbox: '/api/create-mailbox',
-            messages: '/api/messages',
-            test: '/api/test'
-        }
-    });
-});
-
-// ===== TEST =====
-app.get('/api/test', (req, res) => {
-    res.json({ status: '✅ API working', time: new Date().toISOString() });
-});
+// 1secmail API endpoints
+const SECMAIL_API = "https://www.1secmail.com/api/v1";
 
 // ===== CREATE MAILBOX =====
 app.get('/api/create-mailbox', async (req, res) => {
     try {
-        // Get domain
-        const domainRes = await fetch(`${MAIL_API}/domains`);
-        const domainData = await domainRes.json();
-        const domain = domainData['hydra:member'][0].domain;
+        // Generate random email
+        const randomId = Math.random().toString(36).substring(2, 12);
+        const domain = '1secmail.net'; // works with 1secmail.com, 1secmail.org, 1secmail.net
         
-        // Create email
-        const uniqueId = Math.random().toString(36).substring(2, 10);
-        const email = `user_${uniqueId}@${domain}`;
-        const password = `Pass_${uniqueId}!`;
+        const email = randomId + '@' + domain;
+        const password = 'AutoPass' + Math.random().toString(36).substring(2, 8) + '!';
         
-        // Register
-        const registerRes = await fetch(`${MAIL_API}/accounts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: email, password })
-        });
-        
-        if (!registerRes.ok) {
-            return res.status(400).json({ error: 'Registration failed' });
-        }
-        
-        // Get token
-        const tokenRes = await fetch(`${MAIL_API}/token`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: email, password })
-        });
-        
-        const tokenData = await tokenRes.json();
+        console.log('📧 Created:', email);
         
         res.json({
-            email,
-            password,
-            token: tokenData.token,
-            id: tokenData.id
+            email: email,
+            password: password,
+            domain: domain,
+            id: randomId
         });
     } catch (error) {
+        console.error('Create error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -72,20 +41,102 @@ app.get('/api/create-mailbox', async (req, res) => {
 // ===== GET MESSAGES =====
 app.get('/api/messages', async (req, res) => {
     try {
-        const token = req.headers.authorization;
-        if (!token) {
-            return res.status(401).json({ error: 'Missing Authorization header' });
+        const { email } = req.query;
+        if (!email) {
+            return res.status(400).json({ error: 'Missing email parameter' });
         }
         
-        const response = await fetch(`${MAIL_API}/messages`, {
-            headers: { 'Authorization': token }
-        });
+        const [id, domain] = email.split('@');
         
-        const data = await response.json();
-        res.json(data['hydra:member'] || []);
+        // Get message list
+        const response = await fetch(`${SECMAIL_API}/messages/${id}/${domain}`);
+        const messages = await response.json();
+        
+        console.log('📩 Messages for:', email, messages);
+        
+        // Get full content for each message
+        const fullMessages = [];
+        if (messages && messages.length > 0) {
+            for (const msg of messages) {
+                const msgRes = await fetch(`${SECMAIL_API}/message/${id}/${domain}/${msg.id}`);
+                const msgData = await msgRes.json();
+                fullMessages.push({
+                    id: msg.id,
+                    from: msgData.from,
+                    subject: msgData.subject,
+                    body: msgData.textBody || msgData.htmlBody || '',
+                    date: msgData.date
+                });
+            }
+        }
+        
+        res.json(fullMessages);
     } catch (error) {
+        console.error('Messages error:', error);
         res.status(500).json({ error: error.message });
     }
+});
+
+// ===== WAIT FOR MESSAGE (polling) =====
+app.get('/api/wait-for-message', async (req, res) => {
+    try {
+        const { email, maxAttempts = 20, delay = 3000 } = req.query;
+        if (!email) {
+            return res.status(400).json({ error: 'Missing email parameter' });
+        }
+        
+        const [id, domain] = email.split('@');
+        let attempts = 0;
+        
+        while (attempts < parseInt(maxAttempts)) {
+            attempts++;
+            console.log(`⏳ Attempt ${attempts} for ${email}`);
+            
+            try {
+                const response = await fetch(`${SECMAIL_API}/messages/${id}/${domain}`);
+                const messages = await response.json();
+                
+                if (messages && messages.length > 0) {
+                    // Get the first message
+                    const msgRes = await fetch(`${SECMAIL_API}/message/${id}/${domain}/${messages[0].id}`);
+                    const msgData = await msgRes.json();
+                    
+                    return res.json({
+                        found: true,
+                        message: {
+                            id: messages[0].id,
+                            from: msgData.from,
+                            subject: msgData.subject,
+                            body: msgData.textBody || msgData.htmlBody || '',
+                            date: msgData.date
+                        }
+                    });
+                }
+            } catch (e) {
+                console.log('Error checking:', e);
+            }
+            
+            // Wait before next attempt
+            await new Promise(r => setTimeout(r, parseInt(delay)));
+        }
+        
+        res.json({ found: false });
+    } catch (error) {
+        console.error('Wait error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ===== ROOT =====
+app.get('/', (req, res) => {
+    res.json({
+        status: '✅ Backend running with 1secmail',
+        endpoints: {
+            createMailbox: '/api/create-mailbox',
+            messages: '/api/messages?email=EMAIL',
+            waitForMessage: '/api/wait-for-message?email=EMAIL'
+        }
+    });
 });
 
 app.listen(PORT, () => {
