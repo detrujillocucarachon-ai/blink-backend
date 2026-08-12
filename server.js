@@ -3,66 +3,27 @@ const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const MAIL_API = "https://mail.tm";
 
 app.use(cors());
 app.use(express.json());
 
-// Fallback domains in case API fails
-const FALLBACK_DOMAINS = ['mail.tm', 'cliptik.net', 'frandin.com'];
+// Using Guerrilla Mail API (more reliable)
+const GUERRILLA_API = "https://api.guerrillamail.com/ajax.php";
 
 app.get('/api/create-mailbox', async (req, res) => {
     try {
-        let domain;
+        // Create a new email address
+        const createRes = await fetch(`${GUERRILLA_API}?f=get_email_address&ip=127.0.0.1&agent=Mozilla`);
+        const data = await createRes.json();
         
-        // Try to get domains from API first
-        try {
-            const domainRes = await fetch(`${MAIL_API}/domains`);
-            const domainData = await domainRes.json();
-            const domains = domainData['hydra:member'];
-            if (domains && domains.length > 0) {
-                domain = domains[0].domain;
-            }
-        } catch (apiError) {
-            console.log('API fetch failed, using fallback domain');
-        }
-        
-        // Use fallback if API didn't work
-        if (!domain) {
-            domain = FALLBACK_DOMAINS[0];
-        }
-        
-        const uniqueId = Math.random().toString(36).substring(2, 10);
-        const email = `user_${uniqueId}@${domain}`;
-        const password = `Pass_${uniqueId}!`;
-
-        const registerRes = await fetch(`${MAIL_API}/accounts`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: email, password: password })
-        });
-
-        if (!registerRes.ok) {
-            const errorText = await registerRes.text();
-            return res.status(400).json({ error: "Failed to create account", details: errorText });
+        if (!data.email_addr) {
+            return res.status(500).json({ error: "Failed to create email" });
         }
 
-        const loginRes = await fetch(`${MAIL_API}/token`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ address: email, password: password })
-        });
-
-        if (!loginRes.ok) {
-            return res.status(400).json({ error: "Failed to login" });
-        }
-
-        const loginData = await loginRes.json();
         res.json({ 
-            email: email, 
-            token: loginData.token, 
-            accountId: loginData.id,
-            domain: domain
+            email: data.email_addr,
+            email_id: data.email_id,
+            sid_token: data.sid_token
         });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -71,16 +32,34 @@ app.get('/api/create-mailbox', async (req, res) => {
 
 app.get('/api/messages', async (req, res) => {
     try {
-        const token = req.headers['authorization'];
-        if (!token) {
-            return res.status(401).json({ error: "Missing Authorization header" });
+        const emailId = req.query.email_id;
+        const sidToken = req.query.sid_token;
+        
+        if (!emailId || !sidToken) {
+            return res.status(400).json({ error: "Missing email_id or sid_token" });
         }
-        const messagesRes = await fetch(`${MAIL_API}/messages`, {
-            method: 'GET',
-            headers: { 'Authorization': token }
-        });
+
+        const messagesRes = await fetch(`${GUERRILLA_API}?f=get_email_list&offset=0&email_id=${emailId}&sid_token=${sidToken}`);
         const messagesData = await messagesRes.json();
-        res.json(messagesData['hydra:member'] || []);
+        
+        res.json(messagesData.list || []);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.get('/api/read-message', async (req, res) => {
+    try {
+        const { email_id, sid_token, email } = req.query;
+        
+        if (!email_id || !sid_token || !email) {
+            return res.status(400).json({ error: "Missing required parameters" });
+        }
+
+        const readRes = await fetch(`${GUERRILLA_API}?f=fetch_email&email_id=${email_id}&sid_token=${sid_token}&email=${email}`);
+        const readData = await readRes.json();
+        
+        res.json(readData);
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -91,7 +70,8 @@ app.get('/', (req, res) => {
         status: '✅ Backend is running!',
         endpoints: {
             createMailbox: '/api/create-mailbox',
-            messages: '/api/messages'
+            messages: '/api/messages?email_id=YOUR_ID&sid_token=YOUR_TOKEN',
+            readMessage: '/api/read-message?email_id=YOUR_ID&sid_token=YOUR_TOKEN&email=EMAIL_ADDRESS'
         }
     });
 });
